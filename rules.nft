@@ -1,0 +1,34 @@
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        
+        # Allow loopback and established traffic
+        iif "lo" accept
+        ct state established,related accept
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+
+    chain output {
+        type filter hook output priority 0; policy drop;
+
+        # Allow loopback
+        oif "lo" accept
+
+        # Allow traffic through the VPN tunnel (tun0 for OpenVPN, wg0 for Wireguard)
+        oif "tun0" accept
+
+        # Allow traffic to the VPN server's IP via eth0 (to establish the connection)
+        # You'll need to script the insertion of your VPN_SERVER_IP here
+        ip daddr $VPN_SERVER_IP oif "eth0" accept
+
+        # Allow LAN traffic (optional, so you can access the WebUI)
+        ip daddr 192.168.1.0/24 oif "eth0" accept
+    }
+}
