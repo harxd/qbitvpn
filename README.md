@@ -48,6 +48,7 @@ Image=minutelight/qbitvpn:latest
 ContainerName=qbitvpn
 AddCapability=NET_ADMIN
 AddDevice=/dev/net/tun
+SecurityLabelDisable=true
 Environment=VPN_USER=your_vpn_username
 Environment=VPN_PASS=your_vpn_password
 Environment=LAN_SUBNET=192.168.1.0/24
