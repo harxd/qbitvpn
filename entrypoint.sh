@@ -82,11 +82,28 @@ echo "[INFO] Firewall Killswitch Activated."
 ### 2. VPN
 
 echo "[INFO] Launching OpenVPN..."
-OPENVPN_ARGS="--config $OVPN_FILE --daemon"
+# Create /dev/net/tun if it doesn't exist
+if [ ! -e /dev/net/tun ]; then
+    mkdir -p /dev/net
+    mknod /dev/net/tun c 10 200 2>/dev/null || true
+    chmod 600 /dev/net/tun 2>/dev/null || true
+fi
+
+# Replace the hostname with the resolved IP so OpenVPN bypasses blocked DNS
+cp "$OVPN_FILE" /tmp/active.ovpn
+sed -i "s/$REMOTE_SERVER/$VPN_IP/g" /tmp/active.ovpn
+
+OPENVPN_ARGS="--config /tmp/active.ovpn"
 if [ -f "$VPN_CONFIG_DIR/credentials.conf" ]; then
     OPENVPN_ARGS="$OPENVPN_ARGS --auth-user-pass $VPN_CONFIG_DIR/credentials.conf"
 fi
-openvpn $OPENVPN_ARGS
+# Inject local network routes to bypass the VPN tunnel for LAN responses (Fixes WebUI Asymmetric Routing)
+echo "route 192.168.0.0 255.255.0.0 net_gateway" >> /tmp/active.ovpn
+echo "route 10.0.0.0 255.0.0.0 net_gateway" >> /tmp/active.ovpn
+echo "route 172.16.0.0 255.240.0.0 net_gateway" >> /tmp/active.ovpn
+
+# Run in background without daemon so we can see logs
+openvpn $OPENVPN_ARGS &
 
 echo "[INFO] Waiting for tun0 interface (Interface Polling)..."
 while ! ip link show tun0 > /dev/null 2>&1; do
@@ -190,8 +207,35 @@ update_port || true
 ### 4. qBittorrent
 
 echo "[INFO] Starting qBittorrent..."
+
+# Prevent "Unauthorized" by disabling Host Header Validation 
+# Usually happens when a port mapper proxy translates the domain context.
+mkdir -p /config/qBittorrent/config /config/qBittorrent/data
+
+for CONF_FILE in "/config/qBittorrent/qBittorrent.conf" "/config/qBittorrent/config/qBittorrent.conf"; do
+    if [ ! -f "$CONF_FILE" ]; then
+        echo "[Preferences]" > "$CONF_FILE"
+    fi
+    # Strip any existing toggles
+    sed -i '/^WebUI\\HostHeaderValidation/d' "$CONF_FILE" 2>/dev/null || true
+    sed -i '/^WebUI\\CSRFProtection/d' "$CONF_FILE" 2>/dev/null || true
+    
+    # Forcefully append bypasses and default credentials at the absolute end under a fresh scope
+    echo "" >> "$CONF_FILE"
+    echo "[Preferences]" >> "$CONF_FILE"
+    echo "WebUI\HostHeaderValidation=false" >> "$CONF_FILE"
+    echo "WebUI\CSRFProtection=false" >> "$CONF_FILE"
+    echo "WebUI\LocalHostAuth=false" >> "$CONF_FILE"
+    
+    # Only inject default admin:adminadmin if NO password currently exists in the configuration
+    if ! grep -q -i "WebUI\\\\Password" "$CONF_FILE"; then
+        echo "WebUI\Username=admin" >> "$CONF_FILE"
+        echo "WebUI\Password_PBKDF2=\"@ByteArray(ARQ77eY1NUZaQsuDHbIMCA==:0WMRkYTUWVT9wVvdDtHAjU9b3b7uB8NR1Gur2hmQCvCDpm39Q+PsJRJPaCU51dEiz+dTzh8qbPsL8WkFljQYFQ==)\"" >> "$CONF_FILE"
+    fi
+done
+
 # Create a dedicated webui user/password config injection if we wanted to
-qbittorrent-nox --profile=/config --webui-port=8080 -d
+qbittorrent-nox --profile=/config --webui-port=8080 --confirm-legal-notice -d
 
 echo "[INFO] qBittorrent started in the background. Entering Watchdog loop."
 
@@ -200,7 +244,7 @@ while true; do
     sleep 15
     
     # 1. Is the VPN still up? (Check tun0)
-    if ! ip link show tun0 >/dev/null 2>&1; do
+    if ! ip link show tun0 >/dev/null 2>&1; then
         echo "[CRITICAL] tun0 interface disappeared! VPN down!"
         nft flush ruleset
         echo "[CRITICAL] Terminating container."

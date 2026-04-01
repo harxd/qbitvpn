@@ -9,6 +9,9 @@ table inet filter {
         # Allow loopback and established traffic
         iif "lo" accept
         ct state established,related accept
+
+        # Allow WebUI access from the host network
+        tcp dport 8080 accept
     }
 
     chain forward {
@@ -20,15 +23,19 @@ table inet filter {
 
         # Allow loopback
         oif "lo" accept
+        ct state established,related accept
+
+        # Unconditionally allow WebUI responses back out regardless of connection state
+        tcp sport 8080 accept
 
         # Allow traffic through the VPN tunnel (tun0 for OpenVPN, wg0 for Wireguard)
-        oif "tun0" accept
+        oifname "tun0" accept
 
-        # Allow traffic to the VPN server's IP via eth0 (to establish the connection)
+        # Allow traffic to the VPN server's IP (to establish the connection)
         # You'll need to script the insertion of your VPN_SERVER_IP here
-        ip daddr $VPN_SERVER_IP oif "eth0" accept
+        ip daddr $VPN_SERVER_IP accept
 
         # Allow LAN traffic (optional, so you can access the WebUI)
-        ip daddr 192.168.1.0/24 oif "eth0" accept
+        ip daddr 192.168.1.0/24 accept
     }
 }

@@ -13,7 +13,7 @@ COPY entrypoint.sh /entrypoint.sh
 COPY getvpnport.sh /getvpnport.sh
 COPY rules.nft /etc/nftables.conf
 
-RUN sed -i 's/\r$//' /entrypoint.sh /getvpnport.sh && \
+RUN sed -i 's/\r$//' /entrypoint.sh /getvpnport.sh /etc/nftables.conf && \
     chmod +x /entrypoint.sh /getvpnport.sh
 
 # qBittorrent WebUI port
