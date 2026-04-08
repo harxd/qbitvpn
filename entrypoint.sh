@@ -134,8 +134,8 @@ hole_punch() {
     
     # NFT Hole Punch
     # Update nftables to allow incoming on tun0 for the new port
-    nft add rule inet filter input iif "tun0" tcp dport $NEW_PORT accept
-    nft add rule inet filter input iif "tun0" udp dport $NEW_PORT accept
+    nft add rule inet filter input iifname "tun0" tcp dport $NEW_PORT accept
+    nft add rule inet filter input iifname "tun0" udp dport $NEW_PORT accept
 
     # Config Injection
     if [ ! -d "$QBIT_CONFIG_DIR" ]; then
@@ -155,6 +155,17 @@ hole_punch() {
         else
             sed -i '/\[Preferences\]/a Session\\Port='"$NEW_PORT"'' "$QBIT_CONFIG_FILE"
         fi
+        if grep -q "^Connection\\\\PortRangeMin=" "$QBIT_CONFIG_FILE"; then
+            sed -i "s/^Connection\\\\PortRangeMin=.*/Connection\\\\PortRangeMin=$NEW_PORT/" "$QBIT_CONFIG_FILE"
+        else
+            sed -i '/\[Preferences\]/a Connection\\PortRangeMin='"$NEW_PORT"'' "$QBIT_CONFIG_FILE"
+        fi
+        if grep -q "^BitTorrent\\\\Session\\\\Port=" "$QBIT_CONFIG_FILE"; then
+            sed -i "s/^BitTorrent\\\\Session\\\\Port=.*/BitTorrent\\\\Session\\\\Port=$NEW_PORT/" "$QBIT_CONFIG_FILE"
+        else
+            sed -i '/\[Preferences\]/a BitTorrent\\Session\\Port='"$NEW_PORT"'' "$QBIT_CONFIG_FILE"
+        fi
+
         
         # Ensure it binds to tun0
         if grep -q "^Connection\\\\Interface=" "$QBIT_CONFIG_FILE"; then
@@ -180,8 +191,8 @@ update_port() {
             if [ "$NEW_PORT" != "$CURRENT_PORT" ]; then
                 # Remove old rules if port changed
                 if [ "$CURRENT_PORT" -ne 0 ]; then
-                     nft delete rule inet filter input iif "tun0" tcp dport $CURRENT_PORT accept 2>/dev/null || true
-                     nft delete rule inet filter input iif "tun0" udp dport $CURRENT_PORT accept 2>/dev/null || true
+                     nft delete rule inet filter input iifname "tun0" tcp dport $CURRENT_PORT accept 2>/dev/null || true
+                     nft delete rule inet filter input iifname "tun0" udp dport $CURRENT_PORT accept 2>/dev/null || true
                 fi
                 hole_punch "$NEW_PORT"
                 return 0
