@@ -191,14 +191,18 @@ update_port() {
             if [ "$NEW_PORT" != "$CURRENT_PORT" ]; then
                 # Remove old rules if port changed
                 if [ "$CURRENT_PORT" -ne 0 ]; then
-                     nft delete rule inet filter input iifname "tun0" tcp dport $CURRENT_PORT accept 2>/dev/null || true
-                     nft delete rule inet filter input iifname "tun0" udp dport $CURRENT_PORT accept 2>/dev/null || true
+                     TCP_HANDLE=$(nft -a list chain inet filter input | awk -v p="$CURRENT_PORT" '$0 ~ "tcp dport " p " accept" {print $NF}')
+                     UDP_HANDLE=$(nft -a list chain inet filter input | awk -v p="$CURRENT_PORT" '$0 ~ "udp dport " p " accept" {print $NF}')
+                     if [ -n "$TCP_HANDLE" ]; then nft delete rule inet filter input handle $TCP_HANDLE 2>/dev/null || true; fi
+                     if [ -n "$UDP_HANDLE" ]; then nft delete rule inet filter input handle $UDP_HANDLE 2>/dev/null || true; fi
                 fi
                 hole_punch "$NEW_PORT"
+                PORT_CHANGED=1
                 return 0
             else
                 # Port is still the same, just update the token lease timer
                 PORT_START_TIME=$(date +%s)
+                PORT_CHANGED=0
                 return 0
             fi
         else
@@ -212,6 +216,7 @@ update_port() {
 }
 
 # Initial Port forward request
+PORT_CHANGED=0
 update_port || true
 
 
@@ -269,13 +274,13 @@ while true; do
     # Check every 900 seconds (15 minutes)
     if [ $DIFF -gt 900 ]; then
         echo "[INFO] Watchdog: Renewing port lease..."
+        PORT_CHANGED=0
         if update_port; then
-             # If the port changed, we should ideally restart qbittorrent or its socket
-             # But usually qBittorrent picks up the config change on restart or we just let it be.
-             # According to specs, "If it changes, repeat steps 9 and 10."
-             # Qbit won't apply config dynamically unless restarted or using API, but we'll restart it just in case if port changed
-             # But let's avoid restarting unless port actually changed
-             :
+             if [ "$PORT_CHANGED" -eq 1 ]; then
+                 echo "[INFO] Port changed, updating qBittorrent via API..."
+                 # Trigger qBittorrent port change without restarting
+                 curl -s -X POST -d "json={\"listen_port\": ${CURRENT_PORT}}" http://localhost:8080/api/v2/app/setPreferences || true
+             fi
         fi
     fi
 done
