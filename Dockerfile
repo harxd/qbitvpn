@@ -6,7 +6,8 @@ RUN apk add --no-cache \
     openvpn \
     nftables \
     bash \
-    curl
+    curl \
+    tini
 
 # Copy your configuration and scripts
 COPY entrypoint.sh /entrypoint.sh
@@ -19,4 +20,4 @@ RUN sed -i 's/\r$//' /entrypoint.sh /getvpnport.sh /etc/nftables.conf && \
 # qBittorrent WebUI port
 EXPOSE 8080
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/sbin/tini", "-g", "--", "/entrypoint.sh"]

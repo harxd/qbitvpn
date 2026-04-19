@@ -61,3 +61,6 @@ PublishPort=8080:8080
 [Install]
 WantedBy=default.target
 ```
+
+## Potential future upgrades:
+- su-exec

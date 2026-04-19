@@ -255,9 +255,28 @@ qbittorrent-nox --profile=/config --webui-port=8080 --confirm-legal-notice -d
 
 echo "[INFO] qBittorrent started in the background. Entering Watchdog loop."
 
+# Setup signal handlers for tini
+trap 'shutdown_handler' SIGTERM SIGINT
+
+shutdown_handler() {
+    echo "[INFO] Container shutdown initiated. Stopping processes..."
+    # Tell qbittorrent and openvpn to shut down gracefully
+    killall -15 qbittorrent-nox openvpn 2>/dev/null || true
+    
+    # Wait for qbittorrent to finish writing state (it disappears from process list)
+    echo "[INFO] Waiting for qBittorrent to save state..."
+    while pgrep -x "qbittorrent-nox" > /dev/null; do
+        sleep 1
+    done
+    echo "[INFO] Shutdown complete."
+    exit 0
+}
+
 # Watchdog
 while true; do
-    sleep 15
+    # Use background sleep so the trap can interrupt it immediately
+    sleep 15 &
+    wait $!
     
     # 1. Is the VPN still up? (Check tun0)
     if ! ip link show tun0 >/dev/null 2>&1; then
