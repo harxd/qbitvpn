@@ -93,7 +93,7 @@ fi
 cp "$OVPN_FILE" /tmp/active.ovpn
 sed -i "s/$REMOTE_SERVER/$VPN_IP/g" /tmp/active.ovpn
 
-OPENVPN_ARGS="--config /tmp/active.ovpn"
+OPENVPN_ARGS="--config /tmp/active.ovpn --mute-replay-warnings"
 if [ -f "$VPN_CONFIG_DIR/credentials.conf" ]; then
     OPENVPN_ARGS="$OPENVPN_ARGS --auth-user-pass $VPN_CONFIG_DIR/credentials.conf"
 fi
