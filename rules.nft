@@ -1,6 +1,10 @@
 #!/usr/sbin/nft -f
 
-flush ruleset
+# Create table if it doesn't exist so flush doesn't fail
+table inet filter { }
+# CRITICAL FIX: Only flush our specific table. 'flush ruleset' destroys Docker/Podman's 
+# built-in NAT rules (like internal DNS forwarding) if the host uses iptables-nft.
+flush table inet filter
 
 table inet filter {
     chain input {

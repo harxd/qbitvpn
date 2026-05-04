@@ -69,6 +69,11 @@ fi
 
 echo "[INFO] Resolved VPN IP: $VPN_IP"
 
+# Fix DNS leaks and tracker resolution failures in Podman/Docker
+# Forces DNS queries to go through the VPN tunnel instead of the container gateway
+echo "[INFO] Securing DNS routing..."
+echo -e "nameserver 1.1.1.1\nnameserver 1.0.0.1" > /etc/resolv.conf 2>/dev/null || echo "[WARNING] Could not write to /etc/resolv.conf"
+
 # Inject the IP and Subnet into the nftables file
 cp /etc/nftables.conf /etc/nftables.conf.tmp
 sed -i "s/\$VPN_SERVER_IP/$VPN_IP/g" /etc/nftables.conf.tmp
@@ -241,7 +246,7 @@ for CONF_FILE in "/config/qBittorrent/qBittorrent.conf" "/config/qBittorrent/con
     echo "[Preferences]" >> "$CONF_FILE"
     echo "WebUI\HostHeaderValidation=false" >> "$CONF_FILE"
     echo "WebUI\CSRFProtection=false" >> "$CONF_FILE"
-    echo "WebUI\LocalHostAuth=false" >> "$CONF_FILE"
+    echo "WebUI\LocalHostAuth=true" >> "$CONF_FILE"
     
     # Only inject default admin:adminadmin if NO password currently exists in the configuration
     if ! grep -q -i "WebUI\\\\Password" "$CONF_FILE"; then
@@ -281,7 +286,9 @@ while true; do
     # 1. Is the VPN still up? (Check tun0)
     if ! ip link show tun0 >/dev/null 2>&1; then
         echo "[CRITICAL] tun0 interface disappeared! VPN down!"
-        nft flush ruleset
+        # CRITICAL FIX: Do NOT 'nft flush ruleset' here! 
+        # Flushing the ruleset defaults the firewall to ACCEPT, causing a massive IP leak over eth0
+        # before the container fully terminates. Leave the firewall active to maintain the killswitch.
         echo "[CRITICAL] Terminating container."
         kill 1 # Send exit signal to main pid to stop container
         exit 1
