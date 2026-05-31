@@ -28,6 +28,11 @@ fi
 
 echo "[INFO] Configuring Killswitch..."
 
+# Set loose reverse path filtering to prevent kernel from dropping packets due to asymmetric routing
+echo "[INFO] Configuring loose reverse path filtering (rp_filter)..."
+sysctl -w net.ipv4.conf.all.rp_filter=2 >/dev/null 2>&1 || true
+sysctl -w net.ipv4.conf.default.rp_filter=2 >/dev/null 2>&1 || true
+
 # Flush & Initialize: Using rules.nft
 # But first we need to find the VPN Server IP
 OVPN_FILE=$(find "$VPN_CONFIG_DIR" -maxdepth 1 -name "*.ovpn" | head -n 1)
@@ -77,7 +82,20 @@ echo -e "nameserver 1.1.1.1\nnameserver 1.0.0.1" > /etc/resolv.conf 2>/dev/null 
 # Inject the IP and Subnet into the nftables file
 cp /etc/nftables.conf /etc/nftables.conf.tmp
 sed -i "s/\$VPN_SERVER_IP/$VPN_IP/g" /etc/nftables.conf.tmp
-sed -i "s|192.168.1.0/24|$LAN_SUBNET|g" /etc/nftables.conf.tmp
+
+# Format multiple LAN subnets for nftables set format: e.g. { 192.168.1.0/24, 10.0.0.0/24 }
+NFT_SUBNETS=""
+for SUBNET in $(echo "$LAN_SUBNET" | tr ',' ' '); do
+    if [ -z "$NFT_SUBNETS" ]; then
+        NFT_SUBNETS="$SUBNET"
+    else
+        NFT_SUBNETS="$NFT_SUBNETS, $SUBNET"
+    fi
+done
+if [ $(echo "$LAN_SUBNET" | tr ',' ' ' | wc -w) -gt 1 ]; then
+    NFT_SUBNETS="{ $NFT_SUBNETS }"
+fi
+sed -i "s|192.168.1.0/24|$NFT_SUBNETS|g" /etc/nftables.conf.tmp
 
 # Apply nftables rulesets (Killswitch activated)
 nft -f /etc/nftables.conf.tmp || { echo "[ERROR] Failed to apply nftables rules."; exit 1; }
@@ -102,10 +120,38 @@ OPENVPN_ARGS="--config /tmp/active.ovpn --mute-replay-warnings"
 if [ -f "$VPN_CONFIG_DIR/credentials.conf" ]; then
     OPENVPN_ARGS="$OPENVPN_ARGS --auth-user-pass $VPN_CONFIG_DIR/credentials.conf"
 fi
-# Inject local network routes to bypass the VPN tunnel for LAN responses (Fixes WebUI Asymmetric Routing)
-echo "route 192.168.0.0 255.255.0.0 net_gateway" >> /tmp/active.ovpn
-echo "route 10.0.0.0 255.0.0.0 net_gateway" >> /tmp/active.ovpn
-echo "route 172.16.0.0 255.240.0.0 net_gateway" >> /tmp/active.ovpn
+# Inject local network route to bypass the VPN tunnel for LAN responses (Fixes WebUI Asymmetric Routing)
+# We ONLY route the user's defined LAN_SUBNET to avoid overlapping with the VPN provider's internal subnet
+if [ -n "$LAN_SUBNET" ]; then
+    for SUBNET in $(echo "$LAN_SUBNET" | tr ',' ' '); do
+        CIDR_IP=${SUBNET%/*}
+        CIDR_PREFIX=${SUBNET#*/}
+        
+        # Calculate Netmask from CIDR prefix
+        NETMASK=""
+        FULL_OCTETS=$(( CIDR_PREFIX / 8 ))
+        PARTIAL_OCTET=$(( CIDR_PREFIX % 8 ))
+        
+        for i in 0 1 2 3; do
+            if [ $i -lt $FULL_OCTETS ]; then
+                NETMASK="${NETMASK}255"
+            elif [ $i -eq $FULL_OCTETS ]; then
+                OCTET=$(( 256 - (1 << (8 - PARTIAL_OCTET)) ))
+                NETMASK="${NETMASK}${OCTET}"
+            else
+                NETMASK="${NETMASK}0"
+            fi
+            if [ $i -lt 3 ]; then
+                NETMASK="${NETMASK}."
+            fi
+        done
+        
+        echo "[INFO] Injecting route for LAN subnet $SUBNET: route $CIDR_IP $NETMASK net_gateway"
+        echo "route $CIDR_IP $NETMASK net_gateway" >> /tmp/active.ovpn
+    done
+else
+    echo "[WARNING] LAN_SUBNET is empty. No bypass route added."
+fi
 
 # Run in background without daemon so we can see logs
 openvpn $OPENVPN_ARGS &
@@ -191,7 +237,8 @@ hole_punch() {
 update_port() {
     echo "[INFO] Requesting port forwarding..."
     if [ -x "$PORT_FORWARD_SCRIPT" ]; then
-        local NEW_PORT=$("$PORT_FORWARD_SCRIPT")
+        local NEW_PORT
+        NEW_PORT=$("$PORT_FORWARD_SCRIPT")
         if [ "$?" -eq 0 ] && [ -n "$NEW_PORT" ]; then
             if [ "$NEW_PORT" != "$CURRENT_PORT" ]; then
                 # Remove old rules if port changed

@@ -1,0 +1,23 @@
+services:
+  qbitvpn:
+    image: minutelight/qbitvpn:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: qbitvpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    environment:
+      - VPN_USER=your_vpn_username
+      - VPN_PASS=your_vpn_password
+      - LAN_SUBNET=192.168.1.0/24
+      - TZ=Europe/London
+    volumes:
+      - ./config:/config
+      - ./data:/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - 8080:8080
+    restart: unless-stopped
