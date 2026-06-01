@@ -29,6 +29,9 @@ services:
       - /etc/localtime:/etc/localtime:ro
     ports:
       - 8080:8080
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
     restart: unless-stopped
 ```
 
@@ -57,6 +60,8 @@ Volume=%h/qbitvpn/config:/config:Z
 Volume=%h/qbitvpn/data:/data:Z
 Volume=/etc/localtime:/etc/localtime:ro
 PublishPort=8080:8080
+DNS=1.1.1.1
+DNS=1.0.0.1
 
 [Install]
 WantedBy=default.target
