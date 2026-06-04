@@ -11,16 +11,8 @@ fi
 VPN_USER=$(sed -n '1p' "$CRED_FILE" | tr -d '\r' | xargs)
 VPN_PASS=$(sed -n '2p' "$CRED_FILE" | tr -d '\r' | xargs)
 
-# Generate auth token securely through tunnel
-CURL_OUT=$(curl -X POST -k -sS --interface tun0 --data-urlencode "username=$VPN_USER" --data-urlencode "password=$VPN_PASS" "https://www.privateinternetaccess.com/api/client/v2/token" 2>&1)
-TOKEN=$(echo "$CURL_OUT" | grep -o '"token":"[^"]*' | cut -d'"' -f4)
-
-if [ -z "$TOKEN" ]; then
-    echo "[ERROR] Failed to generate PIA API token. Check credentials." >&2
-    echo "[DEBUG] Curl verbose output:" >&2
-    echo "$CURL_OUT" >&2
-    exit 1
-fi
+VPN_USER=$(sed -n '1p' "$CRED_FILE" | tr -d '\r' | xargs)
+VPN_PASS=$(sed -n '2p' "$CRED_FILE" | tr -d '\r' | xargs)
 
 # In OpenVPN PIA connections, the port forward Gateway is always the .1 address 
 # of the IP address assigned to the tun0 interface.
@@ -36,9 +28,34 @@ if ! curl -k -s -m 3 "https://$GATEWAY:19999/getSignature" >/dev/null 2>&1; then
 fi
 
 ip route add "$GATEWAY" dev tun0 2>/dev/null || true
+BIND_URL="https://$GATEWAY:19999/bindPort"
+
+# Check for cached payload and signature
+if [ -f "/tmp/pia_port.txt" ]; then
+    source /tmp/pia_port.txt
+    if [ -n "$PAYLOAD" ] && [ -n "$SIGNATURE" ]; then
+        BIND_RES=$(curl --interface tun0 -k -G -s -m 5 --data-urlencode "payload=$PAYLOAD" --data-urlencode "signature=$SIGNATURE" "$BIND_URL" || true)
+        if echo "$BIND_RES" | grep -q 'OK'; then
+            PORT=$(echo "$PAYLOAD" | base64 -d 2>/dev/null | grep -oEi '"port"\s*:\s*[0-9]+' | grep -oE '[0-9]+')
+            echo "$PORT"
+            exit 0
+        fi
+        # If bind failed, fall through to generate a new port
+    fi
+fi
+
+# Generate auth token securely through tunnel
+CURL_OUT=$(curl -X POST -k -sS --interface tun0 --data-urlencode "username=$VPN_USER" --data-urlencode "password=$VPN_PASS" "https://www.privateinternetaccess.com/api/client/v2/token" 2>&1)
+TOKEN=$(echo "$CURL_OUT" | grep -o '"token":"[^"]*' | cut -d'"' -f4)
+
+if [ -z "$TOKEN" ]; then
+    echo "[ERROR] Failed to generate PIA API token. Check credentials." >&2
+    echo "[DEBUG] Curl verbose output:" >&2
+    echo "$CURL_OUT" >&2
+    exit 1
+fi
 
 PIAPort_URL="https://$GATEWAY:19999/getSignature"
-BIND_URL="https://$GATEWAY:19999/bindPort"
 
 # Wait for PIA local API to be ready
 API_ONLINE=0
@@ -80,6 +97,10 @@ if ! echo "$BIND_RES" | grep -q 'OK'; then
     echo "[ERROR] Failed to bind port: $BIND_RES" >&2
     exit 1
 fi
+
+# Cache payload and signature for renewal
+echo "PAYLOAD=\"$PAYLOAD\"" > /tmp/pia_port.txt
+echo "SIGNATURE=\"$SIGNATURE\"" >> /tmp/pia_port.txt
 
 echo "$PORT"
 exit 0

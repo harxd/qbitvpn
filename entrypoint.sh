@@ -2,6 +2,30 @@
 
 # Configuration and defaults
 LAN_SUBNET=${LAN_SUBNET:-"192.168.1.0/24"}
+
+# Detect default interface (fixes issues in rootless Podman where eth0 might be tap0)
+DEFAULT_IFACE=$(ip -4 route show default | awk '{print $5}' | head -n 1)
+if [ -z "$DEFAULT_IFACE" ]; then
+    DEFAULT_IFACE=$(ip -o -4 addr show 2>/dev/null | awk '$2 != "lo" {print $2}' | head -n 1)
+fi
+if [ -z "$DEFAULT_IFACE" ]; then
+    DEFAULT_IFACE="eth0"
+fi
+echo "[INFO] Detected default network interface: $DEFAULT_IFACE"
+
+# Automatically detect Docker network and add to LAN_SUBNET if not already present
+ETH0_SUBNET=$(ip -o -4 addr show dev "$DEFAULT_IFACE" 2>/dev/null | awk '{print $4}' | head -n 1)
+if [ -n "$ETH0_SUBNET" ]; then
+    echo "[INFO] Detected container Docker network subnet: $ETH0_SUBNET"
+    if [[ ! ",$LAN_SUBNET," =~ ",$ETH0_SUBNET," ]] && [[ ! "$LAN_SUBNET" =~ ^$ETH0_SUBNET(,|$) ]]; then
+        if [ -n "$LAN_SUBNET" ]; then
+            LAN_SUBNET="$LAN_SUBNET,$ETH0_SUBNET"
+        else
+            LAN_SUBNET="$ETH0_SUBNET"
+        fi
+    fi
+fi
+
 VPN_CONFIG_DIR="/config/openvpn"
 QBIT_CONFIG_DIR="/config/qBittorrent/config"
 QBIT_CONFIG_FILE="$QBIT_CONFIG_DIR/qBittorrent.conf"
@@ -83,23 +107,77 @@ echo -e "nameserver 1.1.1.1\nnameserver 1.0.0.1" > /etc/resolv.conf 2>/dev/null 
 cp /etc/nftables.conf /etc/nftables.conf.tmp
 sed -i "s/\$VPN_SERVER_IP/$VPN_IP/g" /etc/nftables.conf.tmp
 
-# Format multiple LAN subnets for nftables set format: e.g. { 192.168.1.0/24, 10.0.0.0/24 }
+# Format multiple LAN subnets for nftables set format and ensure valid network addresses
+CLEAN_LAN_SUBNETS=""
 NFT_SUBNETS=""
 for SUBNET in $(echo "$LAN_SUBNET" | tr ',' ' '); do
-    if [ -z "$NFT_SUBNETS" ]; then
-        NFT_SUBNETS="$SUBNET"
-    else
-        NFT_SUBNETS="$NFT_SUBNETS, $SUBNET"
-    fi
+    CIDR_IP=${SUBNET%/*}
+    CIDR_PREFIX=${SUBNET#*/}
+    if [ "$CIDR_IP" = "$CIDR_PREFIX" ]; then CIDR_PREFIX=24; fi
+    
+    NETMASK=""
+    FULL_OCTETS=$(( CIDR_PREFIX / 8 ))
+    PARTIAL_OCTET=$(( CIDR_PREFIX % 8 ))
+    for i in 0 1 2 3; do
+        if [ $i -lt $FULL_OCTETS ]; then OCTET=255
+        elif [ $i -eq $FULL_OCTETS ]; then OCTET=$(( 256 - (1 << (8 - PARTIAL_OCTET)) ))
+        else OCTET=0; fi
+        if [ -z "$NETMASK" ]; then NETMASK="$OCTET"
+        else NETMASK="${NETMASK}.${OCTET}"; fi
+    done
+    
+    IFS=. read -r i1 i2 i3 i4 <<< "$CIDR_IP"
+    IFS=. read -r m1 m2 m3 m4 <<< "$NETMASK"
+    NET_IP="$((i1 & m1)).$((i2 & m2)).$((i3 & m3)).$((i4 & m4))"
+    
+    CLEAN_SUBNET="$NET_IP/$CIDR_PREFIX"
+    if [ -z "$CLEAN_LAN_SUBNETS" ]; then CLEAN_LAN_SUBNETS="$CLEAN_SUBNET"
+    else CLEAN_LAN_SUBNETS="$CLEAN_LAN_SUBNETS,$CLEAN_SUBNET"; fi
+    
+    if [ -z "$NFT_SUBNETS" ]; then NFT_SUBNETS="$CLEAN_SUBNET"
+    else NFT_SUBNETS="$NFT_SUBNETS, $CLEAN_SUBNET"; fi
 done
+
+LAN_SUBNET="$CLEAN_LAN_SUBNETS"
+
 if [ $(echo "$LAN_SUBNET" | tr ',' ' ' | wc -w) -gt 1 ]; then
     NFT_SUBNETS="{ $NFT_SUBNETS }"
 fi
 sed -i "s|192.168.1.0/24|$NFT_SUBNETS|g" /etc/nftables.conf.tmp
 
+# Check if nftables NAT is supported in this environment (e.g., it is blocked in rootless Podman)
+NAT_SUPPORTED=0
+if nft 'add table ip qbit_test_nat; add chain ip qbit_test_nat postrouting { type nat hook postrouting priority 100; }' >/dev/null 2>&1; then
+    echo "[INFO] nftables NAT is supported."
+    NAT_SUPPORTED=1
+    nft delete table ip qbit_test_nat >/dev/null 2>&1 || true
+fi
+
+if [ $NAT_SUPPORTED -eq 1 ]; then
+    echo "[INFO] Appending NAT masquerade rules..."
+    cat << 'EOF' >> /etc/nftables.conf.tmp
+
+table ip nat {
+    chain qbit_postrouting {
+        type nat hook postrouting priority 100;
+    }
+}
+flush chain ip nat qbit_postrouting
+
+table ip nat {
+    chain qbit_postrouting {
+        oifname "$DEFAULT_IFACE" masquerade
+    }
+}
+EOF
+else
+    echo "[WARNING] nftables NAT is not supported in this environment (common in rootless Podman). Masquerading will be disabled."
+fi
+
 # Apply nftables rulesets (Killswitch activated)
 nft -f /etc/nftables.conf.tmp || { echo "[ERROR] Failed to apply nftables rules."; exit 1; }
 echo "[INFO] Firewall Killswitch Activated."
+
 
 
 ### 2. VPN
@@ -171,6 +249,27 @@ if [ -z "$IP_CHECK" ]; then
     exit 1
 fi
 echo "[INFO] VPN IP is $IP_CHECK"
+
+# DNS Verification
+echo "[INFO] Testing DNS resolution..."
+if nslookup github.com > /dev/null 2>&1; then
+    echo "[INFO] DNS resolution is working correctly."
+else
+    echo "[WARNING] DNS resolution failed! Trackers will not be able to connect."
+    echo "[INFO] Attempting to enforce DNS fallback via nftables DNAT to 1.1.1.1..."
+    if nft 'add chain ip nat qbit_output { type nat hook output priority -100; }' >/dev/null 2>&1; then
+        nft add rule ip nat qbit_output udp dport 53 dnat to 1.1.1.1 >/dev/null 2>&1 || true
+        nft add rule ip nat qbit_output tcp dport 53 dnat to 1.1.1.1 >/dev/null 2>&1 || true
+        echo "[INFO] DNS fallback rules applied. Re-testing DNS..."
+        if nslookup github.com > /dev/null 2>&1; then
+            echo "[INFO] DNS fallback successful! Trackers should now work."
+        else
+            echo "[ERROR] DNS fallback failed. You have a severe routing or DNS issue."
+        fi
+    else
+        echo "[WARNING] Could not apply DNS fallback (nftables nat output hook failed). You must fix your custom DNS."
+    fi
+fi
 
 
 ### 3. Port Forwarding
@@ -293,7 +392,7 @@ for CONF_FILE in "/config/qBittorrent/qBittorrent.conf" "/config/qBittorrent/con
     echo "[Preferences]" >> "$CONF_FILE"
     echo "WebUI\HostHeaderValidation=false" >> "$CONF_FILE"
     echo "WebUI\CSRFProtection=false" >> "$CONF_FILE"
-    echo "WebUI\LocalHostAuth=true" >> "$CONF_FILE"
+    echo "WebUI\LocalHostAuth=false" >> "$CONF_FILE"
     
     # Only inject default admin:adminadmin if NO password currently exists in the configuration
     if ! grep -q -i "WebUI\\\\Password" "$CONF_FILE"; then
